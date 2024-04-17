@@ -6,7 +6,7 @@ Date Created: April 14, 2024
 import pandas as pd
 from datetime import datetime, timedelta
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
+import os
 
 #The following function takes the year from the filename to determine the number of seconds since start of year
 def get_year_start_from_filename(filename):
@@ -36,7 +36,7 @@ def define_dtypes_and_columns():
 
 #Function to read chunks from the respective files
 def read_data_chunks(filename, chunksize, dtypes):
-    return pd.read_csv(filename, delimiter='|', compression='gzip', dtype=dtypes, chunksize=chunksize, error_bad_lines=False)
+    return pd.read_csv(filename, delimiter='|', compression='gzip', dtype=dtypes, chunksize=chunksize, on_bad_lines='skip')
 
 #Function that filters out rows that do not have expected number of fields:
 #b'Skipping line 110: expected 15 fields, saw 16\n'
@@ -47,8 +47,8 @@ def clean_data(chunk):
 
 #Function to process the timestamps and convert it to number of seconds since start of year
 def process_timestamps(chunk, filename, start_of_year):
-    chunk['hour_min_sec'] = chunk['Time'].str.slice(start=0, stop=6)
-    chunk['nanoseconds'] = chunk['Time'].str.slice(start=6).astype(int)
+    chunk['hour_min_sec'] = chunk['Time'].astype(str).str.slice(start=0, stop=6)
+    chunk['nanoseconds'] = chunk['nanoseconds'] = chunk['Time'].astype(str).str.slice(start=6).astype(int)
     chunk['datetime'] = pd.to_datetime(chunk['hour_min_sec'], format='%H%M%S')
     chunk['full_datetime'] = chunk['datetime'] + pd.to_timedelta(chunk['nanoseconds'], unit='ns')
     file_date = get_date_from_filename(filename)
@@ -89,7 +89,8 @@ def preprocess(filename, chunksize=100000):
 
 def main(): 
     pd.set_option('display.max_columns', None)
-    filename = "EQY_US_ALL_TRADE_20240102.gz"
+    print("Current path: ", os.getcwd())
+    filename = "/scratch/ch4262/final_project/EQY_US_ALL_TRADE_20240102.gz"
     processed_data = preprocess(filename)
     print(processed_data.head(50))
     #processed_data.to_csv('output.csv', index=False) # To get the data in csv to review. Note that I did this with a small file
