@@ -10,6 +10,36 @@ import gzip
 import re
 import numpy as np
 
+def compute_global_normalization_params(files, dtypes, use_cols):
+    global_volume = []
+    global_price = []
+
+    for file in files:
+        with gzip.open(file, 'rt') as f:
+            for chunk in pd.read_csv(f, delimiter='|', dtype=dtypes, usecols=use_cols, chunksize=100000):
+                global_volume.extend(chunk['Trade Volume'].dropna().values)
+                global_price.extend(chunk['Trade Price'].dropna().values)
+
+    volume_mean = np.mean(global_volume)
+    volume_std = np.std(global_volume)
+    price_offset = np.min(global_price) - 1 if np.min(global_price) > 1 else 0
+
+    return volume_mean, volume_std, price_offset
+
+#normalize data
+def normalize_data(chunk):
+    #Standard scaling for 'Trade Volume'
+    if not chunk['Trade Volume'].empty:
+        trade_volume_mean = chunk['Trade Volume'].mean()
+        trade_volume_std = chunk['Trade Volume'].std()
+        chunk['Trade Volume'] = (chunk['Trade Volume'] - trade_volume_mean) / trade_volume_std
+    
+    #Log normalization for 'Trade Price'
+    if not chunk['Trade Price'].empty:
+        chunk['Trade Price'] = np.log(chunk['Trade Price'] + 1)
+    
+    return chunk
+
 #Get all the files in final_project folder
 def get_files(directory, pattern):
     return glob.glob(os.path.join(directory, pattern))
@@ -82,6 +112,8 @@ def process_timestamps(chunk, filename, start_of_year):
     valid_rows = chunk['Time'].str.match(r'^\d{6}\d{9}$')
     filtered_chunk = chunk[valid_rows].copy()
 
+    #filtered_chunk = normalize_data(filtered_chunk)
+
     filtered_chunk['execution_datetime'] = parse_trade_execution_time(filtered_chunk)
     filtered_chunk['participant_datetime'] = parse_participant_timestamp(filtered_chunk)
 
@@ -97,7 +129,7 @@ def process_timestamps(chunk, filename, start_of_year):
 
     return filtered_chunk
 
-def preprocess_and_convert_to_parquet(filename, output_dir):
+def preprocess_and_convert_to_parquet(filename, output_dir, volume_mean, volume_std, price_offset):
     dtypes, use_cols = define_dtypes_and_columns()
     chunksize = 100000  #Adjust based on memory constraints
     parquet_writer = None
@@ -108,6 +140,10 @@ def preprocess_and_convert_to_parquet(filename, output_dir):
 
     with gzip.open(filename, 'rt') as f:
         for chunk in pd.read_csv(f, delimiter='|', dtype=dtypes, usecols=use_cols, chunksize=chunksize):
+            
+            chunk['Trade Volume'] = (chunk['Trade Volume'] - volume_mean) / volume_std
+            chunk['Trade Price'] = np.log(chunk['Trade Price'] - price_offset + 1)
+
             chunk = process_timestamps(chunk, filename, get_year_start_from_filename(filename))
 
             table = pa.Table.from_pandas(chunk, preserve_index=False)
@@ -125,7 +161,7 @@ def preprocess_and_convert_to_parquet(filename, output_dir):
                         coerce_timestamps=None,  #Ensure nanosecond precision is maintained
                         allow_truncated_timestamps=False
                     )
-            if parquet_writer is not None:
+            if parquet_writer is not None:                
                 parquet_writer.write_table(table)
 
     if parquet_writer:
@@ -144,8 +180,10 @@ def main():
     total_files_processed = 0
 
     if files:
+        volume_mean, volume_std, price_offset = compute_global_normalization_params(files, *define_dtypes_and_columns())
+
         for file in files:
-            preprocess_and_convert_to_parquet(file, output_dir)
+            preprocess_and_convert_to_parquet(file, output_dir, volume_mean, volume_std, price_offset)
             total_files_processed += 1
         print(f"All files have been processed and converted to Parquet. Total files processed: {total_files_processed}")
     else:

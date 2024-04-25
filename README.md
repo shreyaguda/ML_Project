@@ -32,3 +32,14 @@ pd.set_option('display.max_columns', None)
 parquet_file = 'path/to/your/file.parquet'
 ddf = dd.read_parquet(parquet_file)
 print(ddf.head(20))
+
+## To Use TMUX
+ssh burst
+tmux ls
+to creat new session "tmux new -s [name]"
+
+to open the tmux session: "tmux a -t [name]"
+
+to kill a session on tmux:
+control b d to get out of a tmux
+tmux kill-session -t [name]
