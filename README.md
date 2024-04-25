@@ -37,9 +37,16 @@ print(ddf.head(20))
 ssh burst
 tmux ls
 to creat new session "tmux new -s [name]"
-
 to open the tmux session: "tmux a -t [name]"
-
 to kill a session on tmux:
 control b d to get out of a tmux
 tmux kill-session -t [name]
+
+## How to run a job
+login to greene
+ssh burst
+make sure you are in /scratch/[netid] (or whatever the path to the code file you are running is)
+sbatch gpu_job.slurm
+squeue -u [userid]
+## Do this in BURST, NOT bash!!!
+
