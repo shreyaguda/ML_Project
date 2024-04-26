@@ -2,6 +2,7 @@ import os
 import glob
 from datetime import datetime
 import dask
+import dask.dataframe as dd
 import gzip
 import pandas as pd
 import pyarrow as pa
@@ -123,6 +124,37 @@ def process_timestamps(chunk, filename, start_of_year):
 
     filtered_chunk['seconds_since_start_of_year'] = (filtered_chunk['execution_datetime'] - start_of_year).dt.total_seconds()
     filtered_chunk['latency_ns'] = compute_latency(filtered_chunk['participant_datetime'], filtered_chunk['execution_datetime'])
+
+    # #average volume for trades based on a time window
+    # chunk.set_index('execution_datetime', inplace=True)
+    # chunk['average_volume'] = chunk['Trade Volume'].rolling('5T').mean()
+    # chunk.reset_index(inplace=True)
+
+    #average volume for trades - time based window using dask
+    # Set the index to the execution datetime for rolling operations
+    # filtered_chunk = filtered_chunk.set_index('execution_datetime', sorted=True) --> doesnt work
+    # Remove 'sorted' keyword argument, sort by 'execution_datetime', and set as index
+    filtered_chunk.sort_values('execution_datetime', inplace=True)
+    filtered_chunk.set_index('execution_datetime', inplace=True)
+
+    # After setting 'execution_datetime' as the index, calculate rolling average
+    # Choose the appropriate rolling window size ('5T' for 5 minutes)
+    filtered_chunk['average_volume'] = filtered_chunk['Trade Volume'].rolling('5T').mean()
+
+    # Reset the index if necessary
+    filtered_chunk.reset_index(inplace=True)
+
+    
+    # # Use map_overlap for rolling operations across partitions (Across different files)
+    # # Adjust the 'before' and 'after' values based on your actual window size and data partitioning
+    # filtered_chunk['average_volume'] = filtered_chunk['Trade Volume'].map_overlap(
+    #     lambda s: s.rolling('5T', min_periods=1).mean(),
+    #     before=5,  # Number of periods to extend into previous partition
+    #     after=5    # Number of periods to extend into next partition
+    # ).compute()
+
+    # Reset the index if necessary
+    # filtered_chunk = filtered_chunk.reset_index()
 
     #Drop intermediate columns if they are not needed in the output
     filtered_chunk.drop(columns=['execution_datetime' , 'participant_datetime'], inplace=True)
