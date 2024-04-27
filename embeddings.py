@@ -66,16 +66,6 @@ def preprocess_features(df):
     categorical_cols = ['Exchange', 'Symbol', 'Time', 'Participant Timestamp']  # assuming these are your categorical columns
     numeric_cols = [col for col in df.columns if col not in categorical_cols]  # all other columns are treated as numeric
 
-
-
-    # for col in numeric_cols:
-    #     if df[col].dtype not in ['float64', 'int64']:
-    #         print(f"Warning: Column {col} has non-numeric type {df[col].dtype}")
-
-    # for col in categorical_cols:
-    #     if df[col].isnull().any():
-    #         print(f"Warning: Column {col} contains NaN values")
-
     # Create a transformer pipeline
     transformer = ColumnTransformer([
         ('num', StandardScaler(), numeric_cols),
@@ -87,16 +77,26 @@ def preprocess_features(df):
     print("Numeric columns:", numeric_cols)
     print("Categorical columns:", categorical_cols)
     print(df.head(10))
-    df = pd.DataFrame(df.compute())
+    # df = pd.DataFrame(df.compute())
     try:
         processed_data = pipeline.fit_transform(df)
+        return processed_data
     except Exception as e:
         print("Error during transformation:", e)
         raise
 
     # processed_data = pipeline.fit_transform(df)
 
-    return processed_data
+    
+
+def process_symbol_group(group, autoencoder, encoder):
+    processed_data = preprocess_features(group)
+    sequences = create_sequences(processed_data, 30)  # Adjust window size as needed
+    if sequences.shape[0] > 0:  # Check if there are enough data points after sequence creation
+        autoencoder.fit(sequences, sequences, epochs=20)  # Training the autoencoder on the sequences
+        symbol_embeddings = encoder.predict(sequences)
+        return symbol_embeddings.mean(axis=0)  # Return mean embedding for the symbol
+    return None
 
 
 
@@ -106,48 +106,59 @@ def main():
     directory += "/parquet_output"
     pattern = 'EQY_US_ALL_TRADE_*.parquet'
     files = get_files(directory, pattern)
+    embeddings = {}
     for file in files:
-        df = dd.read_parquet(file)
-    print(f"Files matched: {files}")  #Debugging output
-    output_dir = 'embeddings_output'
-    os.makedirs(output_dir, exist_ok=True)
-    # modified_df = create_sequences(df)
+        ddf = dd.read_parquet(file)  # This is a Dask DataFrame
+        df = ddf.compute()  # Compute once and use the result as a Pandas DataFrame
+        grouped = df.groupby('Symbol')
+        for symbol, group in grouped:
+            if symbol not in embeddings:  # Only process if not already done
+                sample_processed_data = preprocess_features(group.head(30))
+                if sample_processed_data.size > 0:
+                    sample_sequences = create_sequences(sample_processed_data, 30)
+                    if sample_sequences.size > 0:
+                        autoencoder, encoder = build_autoencoder(sample_sequences[0].shape)
+                        symbol_embedding = process_symbol_group(group, autoencoder, encoder)
+                        if symbol_embedding is not None:
+                            embeddings[symbol] = symbol_embedding
 
-    # Compute the Dask DataFrame to retrieve the actual values
-    # computed_df = modified_df.compute()
+    print("Embeddings have been generated and can be used for clustering or other tasks.")
+    print(embeddings)
 
-    # Now you can view the 'features' column
-    # print(modified_df.head())
+    # print("Embeddings have been generated and can be used for clustering or other tasks.")
+    # print(embeddings)
 
-    # Preprocess features
-    # processed_data = preprocess_features(df)
-
-    # df.fillna(method='ffill', inplace=True)  # Handle NaNs
-    print("Preprocessing features...")
-    processed_data = pd.DataFrame(preprocess_features(df).toarray())
-    print(processed_data.head(10))
     
-    print("Features processed. Proceeding to create sequences...")
+    # print(f"Files matched: {files}")  #Debugging output
+    # output_dir = 'embeddings_output'
+    # os.makedirs(output_dir, exist_ok=True)
+    # print("Preprocessing features...")
+    # processed_data = pd.DataFrame(preprocess_features(df).toarray())
+    # print(processed_data.head(10))
+    
+    # print("Features processed. Proceeding to create sequences...")
 
-    # Create sequences
-    sequences = create_sequences(processed_data, 30)
-    volprice = pd.DataFrame(df[["Trade Volume", "Trade Price"]].compute())
-    rolling_sum = volprice.rolling(window=30).sum().iloc[30:].sum(axis=1)
-    # Split data for training and testing
-    print(rolling_sum.head(10))
-    X_train, X_test, Y_train, Y_test = train_test_split(sequences, rolling_sum.values.reshape(969, 1, -1), test_size=0.2, random_state=42)
+
+
+    # # Create sequences
+    # sequences = create_sequences(processed_data, 30)
+    # volprice = pd.DataFrame(df[["Trade Volume", "Trade Price"]].compute())
+    # rolling_sum = volprice.rolling(window=30).sum().iloc[30:].sum(axis=1)
+    # # Split data for training and testing
+    # print(rolling_sum.head(10))
+    # X_train, X_test, Y_train, Y_test = train_test_split(sequences, rolling_sum.values.reshape(969, 1, -1), test_size=0.2, random_state=42)
    
 
-    # Build and train autoencoder
-    autoencoder, encoder = build_autoencoder(X_train[0].shape)
-    autoencoder.fit(X_train, Y_train, epochs=20, validation_data=(X_test, Y_test))
+    # # Build and train autoencoder
+    # autoencoder, encoder = build_autoencoder(X_train[0].shape)
+    # autoencoder.fit(X_train, Y_train, epochs=20, validation_data=(X_test, Y_test))
 
-    # Optionally, extract embeddings
-    embeddings = encoder.predict(X_train)
+    # # Optionally, extract embeddings
+    # embeddings = encoder.predict(X_train)
 
-    print(embeddings)
-    # Save or process embeddings further
-    print("Embeddings have been generated and can be used for clustering or other tasks.")
+    # print(embeddings)
+    # # Save or process embeddings further
+    # print("Embeddings have been generated and can be used for clustering or other tasks.")
 
 
     # # Print the modified DataFrame
