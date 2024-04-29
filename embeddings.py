@@ -19,23 +19,22 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from scipy.sparse import vstack
+import tensorflow as tf
 
-# # Specify the path to your Parquet file
-# parquet_file_path = 
-
-# # Read the Parquet file using Dask
-# df = dd.read_parquet(parquet_file_path)
-
-# def get_sentences(df):
-#     # df['daily_return'] = df.groupby('Symbol')['Trade Price']
-#     df = df.groupby('Symbol')['average_volume']
-#     return df
+MIN_ROWS = 100  #minimum number of rows needed for processing
 
 def create_sequences(data, window_size=5):
     sequences = []
-    for i in range(data.shape[0] - window_size):
-        sequences.append(data.iloc[i:(i + window_size), :].values)
-    return np.array(sequences)
+    print(f"Data shape before sequence creation: {data.shape}")
+    if data.shape[0] > window_size:
+        for i in range(data.shape[0] - window_size + 1):
+            sequence = vstack([data[j] for j in range(i, i + window_size)])  #Needed for sparse matrix 
+            sequences.append(sequence)
+        print(f"Number of sequences created: {len(sequences)}")
+    else:
+        print("Not enough data to create sequences")
+    return sequences
 
 def build_autoencoder(input_shape):
     inputs = Input(shape=input_shape)
@@ -53,14 +52,6 @@ def build_autoencoder(input_shape):
 def get_files(directory, pattern):
     return glob.glob(os.path.join(directory, pattern))
 
-# def process_data(files):
-#     data_frames = []
-#     for file in files:
-#         df = dd.read_parquet(file).compute()  # Ensure this fits in memory or handle chunkwise
-#         data_frames.append(df)
-#     full_df = pd.concat(data_frames, ignore_index=True)
-#     return full_df
-
 def preprocess_features(df):
     # Define which columns are categorical and which are numeric
     categorical_cols = ['Exchange', 'Symbol', 'Time', 'Participant Timestamp']  # assuming these are your categorical columns
@@ -74,9 +65,9 @@ def preprocess_features(df):
 
     # Fit and transform the data
     pipeline = Pipeline(steps=[('preprocessor', transformer)])
-    print("Numeric columns:", numeric_cols)
+    """ print("Numeric columns:", numeric_cols)
     print("Categorical columns:", categorical_cols)
-    print(df.head(10))
+    print(df.head(10)) """
     # df = pd.DataFrame(df.compute())
     try:
         processed_data = pipeline.fit_transform(df)
@@ -85,100 +76,49 @@ def preprocess_features(df):
         print("Error during transformation:", e)
         raise
 
-    # processed_data = pipeline.fit_transform(df)
-
-    
-
-def process_symbol_group(group, autoencoder, encoder):
+def process_symbol_group(group, autoencoder, encoder, window_size):
     processed_data = preprocess_features(group)
-    sequences = create_sequences(processed_data, 30)  # Adjust window size as needed
-    if sequences.shape[0] > 0:  # Check if there are enough data points after sequence creation
-        autoencoder.fit(sequences, sequences, epochs=20)  # Training the autoencoder on the sequences
+    sequences = create_sequences(processed_data, window_size)  #Using dynamic window size
+    sequences = [seq.toarray() for seq in sequences]  #Convert sequences to dense format after change create sequence function
+    if len(sequences) > 0:
+        sequences = np.array(sequences)
+        autoencoder.fit(sequences, sequences, epochs=20)  #Training the autoencoder
         symbol_embeddings = encoder.predict(sequences)
-        return symbol_embeddings.mean(axis=0)  # Return mean embedding for the symbol
+        return symbol_embeddings.mean(axis=0)  #Return mean embedding for the symbol
     return None
 
-
+#Create a dynamic window size because 30 for sequence is not working
+"""debug output indicates that while the script is processing rows for each symbol, it only uses the first 30 rows for the sequence generation, which isn't enough to create any sequences with your current setup. This is because the window size (30) and the number of rows you're using (30) match exactly, which means no sliding window of data can be created—it would only form one sequence exactly matching the input if the loop condition allowed for zero iterations, which it doesn't as currently set up."""
+def choose_window_size(group, min_size=30, max_size=100):
+    proposed_size = int(len(group) * 0.1)  # 10% of the group's length
+    return max(min_size, min(proposed_size, max_size))  # Ensures the size is within specified bounds
 
 def main():
-    directory = os.getcwd()
-    print("Directory: ", directory)
-    directory += "/parquet_output"
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU'))) #Need to check if enough GPU after script got killed :( 
+    directory = os.getcwd() + "/parquet_output"
     pattern = 'EQY_US_ALL_TRADE_*.parquet'
     files = get_files(directory, pattern)
     embeddings = {}
     for file in files:
-        ddf = dd.read_parquet(file)  # This is a Dask DataFrame
-        df = ddf.compute()  # Compute once and use the result as a Pandas DataFrame
+        ddf = dd.read_parquet(file)
+        df = ddf.compute()
         grouped = df.groupby('Symbol')
         for symbol, group in grouped:
-            if symbol not in embeddings:  # Only process if not already done
-                sample_processed_data = preprocess_features(group.head(30))
-                if sample_processed_data.size > 0:
-                    sample_sequences = create_sequences(sample_processed_data, 30)
-                    if sample_sequences.size > 0:
-                        autoencoder, encoder = build_autoencoder(sample_sequences[0].shape)
-                        symbol_embedding = process_symbol_group(group, autoencoder, encoder)
+            print(f"Processing {symbol} with {group.shape[0]} rows.")
+            if group.shape[0] > MIN_ROWS:
+                window_size = choose_window_size(group) #Get a dynamic window size instead of 30
+                sample_processed_data = preprocess_features(group)
+                if sample_processed_data.shape[0] > 0:
+                    sample_sequences = create_sequences(sample_processed_data, window_size)
+                    if len(sample_sequences) > 0:
+                        sequence_shape = (sample_sequences[0].shape[0], sample_sequences[0].shape[1])  #Adjusting shape after changing create sequence function to get sparse matrix
+                        autoencoder, encoder = build_autoencoder(sequence_shape)
+                        symbol_embedding = process_symbol_group(group, autoencoder, encoder, window_size)
                         if symbol_embedding is not None:
                             embeddings[symbol] = symbol_embedding
 
     print("Embeddings have been generated and can be used for clustering or other tasks.")
-    print(embeddings)
-
-    # print("Embeddings have been generated and can be used for clustering or other tasks.")
-    # print(embeddings)
-
-    
-    # print(f"Files matched: {files}")  #Debugging output
-    # output_dir = 'embeddings_output'
-    # os.makedirs(output_dir, exist_ok=True)
-    # print("Preprocessing features...")
-    # processed_data = pd.DataFrame(preprocess_features(df).toarray())
-    # print(processed_data.head(10))
-    
-    # print("Features processed. Proceeding to create sequences...")
-
-
-
-    # # Create sequences
-    # sequences = create_sequences(processed_data, 30)
-    # volprice = pd.DataFrame(df[["Trade Volume", "Trade Price"]].compute())
-    # rolling_sum = volprice.rolling(window=30).sum().iloc[30:].sum(axis=1)
-    # # Split data for training and testing
-    # print(rolling_sum.head(10))
-    # X_train, X_test, Y_train, Y_test = train_test_split(sequences, rolling_sum.values.reshape(969, 1, -1), test_size=0.2, random_state=42)
-   
-
-    # # Build and train autoencoder
-    # autoencoder, encoder = build_autoencoder(X_train[0].shape)
-    # autoencoder.fit(X_train, Y_train, epochs=20, validation_data=(X_test, Y_test))
-
-    # # Optionally, extract embeddings
-    # embeddings = encoder.predict(X_train)
-
-    # print(embeddings)
-    # # Save or process embeddings further
-    # print("Embeddings have been generated and can be used for clustering or other tasks.")
-
-
-    # # Print the modified DataFrame
-    # print(modified_df.head(10))
-
-    # # Or you can access specific columns
-    # print(modified_df['features'].head(10))
-
-
-    # total_files_processed = 0
-
-    # if files:
-    #     volume_mean, volume_std, price_offset = compute_global_normalization_params(files, *define_dtypes_and_columns())
-
-    #     for file in files:
-    #         preprocess_and_convert_to_parquet(file, output_dir, volume_mean, volume_std, price_offset)
-    #         total_files_processed += 1
-    #     print(f"All files have been processed and converted to Parquet. Total files processed: {total_files_processed}")
-    # else:
-    #     print("No files processed or files were empty.")
+    print(f"Processed {len(embeddings)} embeddings.")
 
 if __name__ == "__main__":
     main()
