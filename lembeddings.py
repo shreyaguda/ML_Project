@@ -13,6 +13,7 @@ import numpy as np
 from keras.models import Sequential
 import os
 import glob
+import scipy
 from keras.models import Model
 from keras.layers import Input, LSTM, RepeatVector, Dense
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -79,7 +80,7 @@ def preprocess_features(df):
     # df = pd.DataFrame(df.compute())
     try:
         processed_data = pipeline.fit_transform(df)
-        return processed_data
+        return scipy.sparse.csr_matrix(processed_data)
     except Exception as e:
         print("Error during transformation:", e)
         raise
@@ -105,11 +106,17 @@ def main():
     pattern = 'EQY_US_ALL_TRADE_*.parquet'
     files = get_files(directory, pattern)
     embeddings = {}
+    count = 0
+    broke = False
     for file in files:
         ddf = dd.read_parquet(file)  # This is a Dask DataFrame
         df = ddf.compute()  # Compute once and use the result as a Pandas DataFrame
         grouped = df.groupby('Symbol')
         for symbol, group in grouped:
+            count += 1
+            if count > 20:
+                broke = True
+                break
             if symbol not in embeddings:  # Only process if not already done
                 print("symbol not in")
                 sample_processed_data = preprocess_features(group)
@@ -124,7 +131,8 @@ def main():
                         if symbol_embedding is not None:
                             print("embedding exists")
                             embeddings[symbol] = symbol_embedding
-
+        if broke:
+            break
     print("Embeddings have been generated and can be used for clustering or other tasks.")
     for i in embeddings:
         print(embeddings[i])
