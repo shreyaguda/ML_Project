@@ -77,19 +77,13 @@ def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3):
 def train_embedding_model(df, model):
     logging.info("Starting model training.")
 
-    # Updated feature list to include date-time features
-    numerical_features = [
-        'Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean',
-        'month_sin', 'month_cos', 'day_sin', 'day_cos',
-        'hour_sin', 'hour_cos', 'minute_sin', 'minute_cos', 
-        'second_sin', 'second_cos', 'year', 'nanoseconds'
-    ]
+    numerical_features = ['Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean']
     
-    # Check if all columns are present
+    # Confirm columns
     if not all(col in df.columns for col in numerical_features):
         raise ValueError("One or more required columns are missing from the DataFrame.")
 
-    # Continue as before
+    # Split the data
     split_point = int(len(df) * 0.8)
     train_df = df.iloc[:split_point]
     val_df = df.iloc[split_point:]
@@ -97,15 +91,18 @@ def train_embedding_model(df, model):
     logging.info(f"Training DataFrame shape: {train_df.shape}")
     logging.info(f"Validation DataFrame shape: {val_df.shape}")
 
-    train_inputs = train_df['Symbol'].values.reshape(-1, 1)
-    val_inputs = val_df['Symbol'].values.reshape(-1, 1)
+    # Prepare inputs for embedding model
+    train_inputs = train_df['Symbol'].values.reshape(-1, 1)  # Reshape for embedding input
+    val_inputs = val_df['Symbol'].values.reshape(-1, 1)      # Reshape for embedding input
 
     train_targets = train_df[numerical_features].values
     val_targets = val_df[numerical_features].values
 
+    # Setup callbacks
     early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
 
+    # Fit the model
     history = model.fit(train_inputs, train_targets, epochs=50, batch_size=1000,
                         validation_data=(val_inputs, val_targets), callbacks=[early_stopping, reduce_lr])
 
@@ -155,10 +152,6 @@ def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
 def process_aggregated_data(aggregated_data, embeddings_file):
     symbol_ids = get_symbol_id_mapping(aggregated_data)
     aggregated_data = replace_symbols_with_ids(aggregated_data, symbol_ids)
-
-    # Convert execution datetimes to a simpler feature
-    aggregated_data = convert_datetime_features(aggregated_data)
-
     logging.info(f"Columns available in DataFrame: {aggregated_data.columns}")
     scaled_data = scale_data(aggregated_data)
     #pca_data, pca_model = apply_pca(scaled_data, n_components=0.95)
@@ -196,39 +189,27 @@ def process_file(file_path, embeddings_file):
     # More debugging outputs to trace the data
     print("Final columns in aggregated data:", aggregated_data.columns)
 
-def convert_datetime_features(df):
-    # Convert list of execution datetimes to a simple count of unique datetimes
-    df['Execution Datetimes Count'] = df['Execution Datetimes'].apply(len)
-    return df
+def aggregate_and_compute(ddf):
+    # Define simplified metadata to test the basic functionality
+    meta = {
+        'Symbol': 'object',
+        'Trade Volume Log_mean': 'float64',
+        'Trade Price Log_mean': 'float64',
+        'Volume_Price_Ratio_mean': 'float64'
+    }
 
+    return ddf.map_partitions(aggregate_data, meta=meta).compute()
 
 def aggregate_data(df):
-    # Aggregate and explicitly name the columns with '_mean' suffix
+    # Perform a simplified aggregation to debug
     df_agg = df.groupby('Symbol').agg({
         'Trade Volume Log': 'mean',
         'Trade Price Log': 'mean',
         'Volume_Price_Ratio': 'mean',
     }).reset_index()
 
-    # Collect all unique execution datetimes for each symbol into a list
-    execution_datetimes = df.groupby('Symbol')['Execution DateTime'].unique().reset_index()
-    execution_datetimes.rename(columns={'Execution DateTime': 'Execution Datetimes'}, inplace=True)
-
-    # Merge the aggregated data with the datetime lists
-    df_agg = pd.merge(df_agg, execution_datetimes, on='Symbol', how='left')
-    df_agg.columns = ['Symbol', 'Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean' ,'Execution Datetimes']
+    df_agg.columns = ['Symbol', 'Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean']
     return df_agg
-
-def aggregate_and_compute(ddf):
-    meta = {
-        'Symbol': 'object',
-        'Trade Volume Log_mean': 'float64',  # corrected from 'Trade Volume Log_mean'
-        'Trade Price Log_mean': 'float64',   # corrected from 'Trade Price Log_mean'
-        'Volume_Price_Ratio_mean': 'float64', # corrected from 'Volume_Price_Ratio_mean'
-        'Execution Datetimes': 'object'  # make sure to include all columns that are produced
-    }
-    return ddf.map_partitions(aggregate_data, meta=meta).compute()
-
 
 def main():
     # Set up logging

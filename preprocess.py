@@ -1,50 +1,12 @@
 import os
 import glob
 from datetime import datetime
-import dask
-import dask.dataframe as dd
-import gzip
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import gzip
 import re
 import numpy as np
- 
-#Function to compute the global volume and price as part of data normalization
-def compute_global_normalization_params(files, dtypes, use_cols):
-    start_time = datetime.now()  # Start timing
-    global_volume = []
-    global_price = []
-
-    for file in files:
-        with gzip.open(file, 'rt') as f:
-            for chunk in pd.read_csv(f, delimiter='|', dtype=dtypes, usecols=use_cols, chunksize=100000):
-                global_volume.extend(chunk['Trade Volume'].dropna().values)
-                global_price.extend(chunk['Trade Price'].dropna().values)
-
-    volume_mean = np.mean(global_volume)
-    volume_std = np.std(global_volume)
-    price_offset = np.min(global_price) - 1 if np.min(global_price) > 1 else 0
-
-    end_time = datetime.now()  # End timing
-    print(f"Time taken to compute global normalization params: {end_time - start_time}")  # Print elapsed time
-
-    return volume_mean, volume_std, price_offset
-
-#Normalize the data
-def normalize_data(chunk):
-    #Standard scaling for 'Trade Volume'
-    if not chunk['Trade Volume'].empty:
-        trade_volume_mean = chunk['Trade Volume'].mean()
-        trade_volume_std = chunk['Trade Volume'].std()
-        chunk['Trade Volume'] = (chunk['Trade Volume'] - trade_volume_mean) / trade_volume_std
-    
-    #Log normalization for 'Trade Price'
-    if not chunk['Trade Price'].empty:
-        chunk['Trade Price'] = np.log(chunk['Trade Price'] + 1)
-    
-    return chunk
 
 #Get all the files in final_project folder
 def get_files(directory, pattern):
@@ -69,6 +31,12 @@ def count_lines_in_gz_file(file_path):
 def get_file_size(file_path):
     return os.path.getsize(file_path)
 
+def clean_data(chunk):
+    # Assuming all rows should have exactly the same number of fields as there are columns defined
+    expected_num_fields = len(chunk.columns)
+    chunk = chunk.dropna(how='any')  # Drop rows with any NaN values which might indicate missing fields
+    return chunk[chunk.apply(lambda x: len(x) == expected_num_fields, axis=1)]
+
 #Get all the datatypes and columns from file
 def define_dtypes_and_columns():
     dtypes = {
@@ -91,60 +59,44 @@ def define_dtypes_and_columns():
     use_cols = ['Time', 'Exchange','Symbol', 'Trade Volume', 'Trade Price', 'Participant Timestamp']
     return dtypes, use_cols
 
-#Parse the 'Time' column to combine hours, minutes, seconds, and nanoseconds into a datetime.
-def parse_trade_execution_time(chunk):
-    datetime_component = pd.to_datetime(chunk['Time'].str.slice(0, 6), format='%H%M%S', errors='coerce')
-    nanoseconds = pd.to_timedelta(chunk['Time'].str.slice(6).astype(int), unit='ns')
-    return datetime_component + nanoseconds
-
-#Parse the 'Participant Timestamp' in HHMMSS followed by nanoseconds.
-def parse_participant_timestamp(chunk):
-    participant_time_data = chunk['Participant Timestamp'].str.extract(r'(\d{6})(\d{9})')
-    participant_time_data[1] = participant_time_data[1].fillna('0').astype(int)
-    datetime_component = pd.to_datetime(participant_time_data[0], format='%H%M%S', errors='coerce')
-    nanoseconds = pd.to_timedelta(participant_time_data[1], unit='ns')
-    return datetime_component + nanoseconds
-
 #Add the date component from the filename to time data.
 def add_date_component(time_data, file_date):
     date_timestamp = pd.to_datetime(file_date.strftime('%Y-%m-%d'))
     return date_timestamp + (time_data - time_data.dt.normalize())
 
-#Compute latency as the difference between execution and participant reporting timestamps.
-def compute_latency(participant_datetime, execution_datetime):
-    return (execution_datetime - participant_datetime).dt.total_seconds() * 1e9
+def add_full_nanoseconds(chunk):
+    # Calculate full nanoseconds since the last full second
+    chunk['nanoseconds'] = chunk['Execution DateTime'].dt.microsecond * 1000 + chunk['Execution DateTime'].dt.nanosecond
+    return chunk
 
-def process_timestamps(chunk, filename, start_of_year):
-    valid_rows = chunk['Time'].str.match(r'^\d{6}\d{9}$')
-    filtered_chunk = chunk[valid_rows].copy()
+# Parse the 'Time' and 'Participant Timestamp' columns to extract time components and calculate latency
+def parse_trade_execution_time(chunk, file_date):
+    base_date = pd.to_datetime(file_date.strftime('%Y-%m-%d'))
 
-    filtered_chunk['execution_datetime'] = parse_trade_execution_time(filtered_chunk)
-    filtered_chunk['participant_datetime'] = parse_participant_timestamp(filtered_chunk)
+    chunk['Execution DateTime'] = pd.to_datetime(base_date.strftime('%Y-%m-%d') + ' ' + chunk['Time'].str.slice(0, 6), format='%Y-%m-%d %H%M%S')
+    chunk['Execution DateTime'] += pd.to_timedelta(chunk['Time'].str.slice(6).astype(int), unit='ns')
 
-    file_date = get_date_from_filename(filename)
-    filtered_chunk['execution_datetime'] = add_date_component(filtered_chunk['execution_datetime'], file_date)
-    filtered_chunk['participant_datetime'] = add_date_component(filtered_chunk['participant_datetime'], file_date)
+    participant_base_datetime = pd.to_datetime(base_date.strftime('%Y-%m-%d') + ' ' + chunk['Participant Timestamp'].str.slice(0, 6), format='%Y-%m-%d %H%M%S')
+    chunk['Participant DateTime'] = participant_base_datetime + pd.to_timedelta(chunk['Participant Timestamp'].str.slice(6).astype(int), unit='ns')
 
-    filtered_chunk['seconds_since_start_of_year'] = (filtered_chunk['execution_datetime'] - start_of_year).dt.total_seconds()
-    filtered_chunk['latency_ns'] = compute_latency(filtered_chunk['participant_datetime'], filtered_chunk['execution_datetime'])
+    chunk['latency_ns'] = (chunk['Execution DateTime'] - chunk['Participant DateTime']).dt.total_seconds() * 1e9
 
-    filtered_chunk.sort_values('execution_datetime', inplace=True)
-    filtered_chunk.set_index('execution_datetime', inplace=True)
+    # Additional step to calculate full nanoseconds
+    chunk = add_full_nanoseconds(chunk)
 
-    # After setting 'execution_datetime' as the index, calculate rolling average
-    # Choose the appropriate rolling window size ('5T' for 5 minutes)
-    filtered_chunk['average_volume'] = filtered_chunk['Trade Volume'].rolling('5T').mean()
+    chunk['year'] = chunk['Execution DateTime'].dt.year
+    chunk['month'] = chunk['Execution DateTime'].dt.month
+    chunk['day'] = chunk['Execution DateTime'].dt.day
+    chunk['hour'] = chunk['Execution DateTime'].dt.hour
+    chunk['minute'] = chunk['Execution DateTime'].dt.minute
+    chunk['second'] = chunk['Execution DateTime'].dt.second
 
-    # Reset the index if necessary
-    filtered_chunk.reset_index(inplace=True)
-
-    #Drop intermediate columns if they are not needed in the output
-    filtered_chunk.drop(columns=['execution_datetime' , 'participant_datetime'], inplace=True)
-
-    return filtered_chunk
+    # Clean up the DataFrame
+    chunk.drop(columns=['Participant Timestamp', 'Time', 'Participant DateTime' ], inplace=True)
+    return chunk
 
 #THis function retrieves the file and preprocesses it. It then stores the preprocessed data into parquet files 
-def preprocess_and_convert_to_parquet(filename, output_dir, volume_mean, volume_std, price_offset):
+def preprocess_and_convert_to_parquet(filename, output_dir):
     dtypes, use_cols = define_dtypes_and_columns()
     chunksize = 100000  #Adjust based on memory constraints
     parquet_writer = None
@@ -153,13 +105,12 @@ def preprocess_and_convert_to_parquet(filename, output_dir, volume_mean, volume_
     line_count = count_lines_in_gz_file(filename)  #Count lines
     print(f"Processing {filename}: {line_count} lines found.")
 
-    with gzip.open(filename, 'rt') as f:
-        for chunk in pd.read_csv(f, delimiter='|', dtype=dtypes, usecols=use_cols, chunksize=chunksize):
-            
-            chunk['Trade Volume'] = (chunk['Trade Volume'] - volume_mean) / volume_std
-            chunk['Trade Price'] = np.log(chunk['Trade Price'] - price_offset + 1)
+    file_date = get_date_from_filename(filename)
 
-            chunk = process_timestamps(chunk, filename, get_year_start_from_filename(filename))
+    with gzip.open(filename, 'rt') as f:
+        for chunk in pd.read_csv(f, delimiter='|', dtype=dtypes, usecols=use_cols, chunksize=chunksize): 
+            chunk = clean_data(chunk)
+            chunk = parse_trade_execution_time(chunk, file_date)
 
             table = pa.Table.from_pandas(chunk, preserve_index=False)
 
@@ -188,19 +139,16 @@ def main():
     start_time = datetime.now()  #Start timing for the whole main function
     directory = os.getcwd()
     print("Directory: ", directory)
-    pattern = 'EQY_US_ALL_TRADE_202401*.gz'
+    pattern = 'EQY_US_ALL_TRADE_20240102.gz'
     files = get_files(directory, pattern)
     print(f"Files matched: {files}")  #Debugging output
-    output_dir = 'parquet_output2'
+    output_dir = 'parquet_output'
     os.makedirs(output_dir, exist_ok=True)
     total_files_processed = 0
 
     if files:
-        volume_mean, volume_std, price_offset = compute_global_normalization_params(files, *define_dtypes_and_columns())
-        print(f"Finished computing global normalization parameters: Volume_mean: {volume_mean}, Volume_std: {volume_std}, price_offset, {price_offset}")
-
         for file in files:
-            preprocess_and_convert_to_parquet(file, output_dir, volume_mean, volume_std, price_offset)
+            preprocess_and_convert_to_parquet(file, output_dir)
             total_files_processed += 1
         print(f"All files have been processed and converted to Parquet. Total files processed: {total_files_processed}")
     else:
