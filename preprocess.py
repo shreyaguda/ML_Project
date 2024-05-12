@@ -139,7 +139,7 @@ def main():
     start_time = datetime.now()  #Start timing for the whole main function
     directory = os.getcwd()
     print("Directory: ", directory)
-    pattern = 'EQY_US_ALL_TRADE_20240102.gz'
+    pattern = 'EQY_US_ALL_TRADE_*.gz'
     files = get_files(directory, pattern)
     print(f"Files matched: {files}")  #Debugging output
     output_dir = 'parquet_output'

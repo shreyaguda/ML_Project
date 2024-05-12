@@ -1,52 +1,45 @@
 import dask.dataframe as dd
-from sklearn.preprocessing import StandardScaler
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import logging
 import os
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 from keras.models import Model
-from keras.layers import Input, Embedding, Dense, Flatten, Dropout
+from keras.layers import Input, Embedding, Dense, Flatten, Dropout, LeakyReLU
 from keras.regularizers import l2
 from keras.optimizers import Adam
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
-import pyarrow as pa
-import pyarrow.parquet as pq
-from sklearn.decomposition import PCA
-import logging
 from preprocess import get_files
-from keras.layers import Concatenate  # Import required for Concatenate
+import matplotlib.pyplot as plt
+import tensorflow as tf
 
-def get_symbol_id_mapping(df):
+
+# Set the environment variable for TensorFlow to use asynchronous GPU allocation
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+
+def load_sector_data(filepath):
+    """Load sector data, specifying Symbol as a string to ensure type consistency."""
+    return pd.read_csv(filepath, header=None, names=['Symbol', 'Sector'], dtype={'Symbol': str})
+
+def get_symbol_id_mapping(df, included_symbols):
+    """Map each symbol to a unique ID for use in the model."""
+    df = df[df['Symbol'].isin(included_symbols['Symbol'])]
     symbol_ids = {symbol: idx for idx, symbol in enumerate(df['Symbol'].unique())}
-    print("Symbol IDs generated:", len(symbol_ids))  # Debugging output
+    logging.info(f"Symbol IDs generated: {len(symbol_ids)}")
     return symbol_ids
 
 def replace_symbols_with_ids(df, symbol_ids):
-    # Replace symbols with numeric IDs and keep them as integers
-    df['Symbol'] = df['Symbol'].apply(lambda x: symbol_ids[x])
-    return df
-
-def add_datetime_features(df):
-    df['Execution DateTime'] = pd.to_datetime(df['Execution DateTime'])
-
-    # Cyclic transformations for day, month, hour, minute, second
-    df['month_sin'] = np.sin(2 * np.pi * df['Execution DateTime'].dt.month / 12)
-    df['month_cos'] = np.cos(2 * np.pi * df['Execution DateTime'].dt.month / 12)
-    df['day_sin'] = np.sin(2 * np.pi * df['Execution DateTime'].dt.day / df['Execution DateTime'].dt.days_in_month)
-    df['day_cos'] = np.cos(2 * np.pi * df['Execution DateTime'].dt.day / df['Execution DateTime'].dt.days_in_month)
-    df['hour_sin'] = np.sin(2 * np.pi * df['Execution DateTime'].dt.hour / 24)
-    df['hour_cos'] = np.cos(2 * np.pi * df['Execution DateTime'].dt.hour / 24)
-    df['minute_sin'] = np.sin(2 * np.pi * df['Execution DateTime'].dt.minute / 60)
-    df['minute_cos'] = np.cos(2 * np.pi * df['Execution DateTime'].dt.minute / 60)
-    df['second_sin'] = np.sin(2 * np.pi * df['Execution DateTime'].dt.second / 60)
-    df['second_cos'] = np.cos(2 * np.pi * df['Execution DateTime'].dt.second / 60)
-
-    # Year and nanoseconds can be scaled linearly if needed
-    df['year'] = df['Execution DateTime'].dt.year
-    df['nanoseconds'] = df['Execution DateTime'].dt.nanosecond
-
+    """Replace symbol strings with their corresponding IDs in the dataframe."""
+    df['Symbol'] = df['Symbol'].apply(lambda x: symbol_ids.get(x, -1))  # Use -1 for missing symbols to debug
+    logging.info("After replacing symbols, data sample: {}".format(df.head()))
     return df
 
 def normalize_and_log_scale(df, window_size=50):
+    """Normalize trade volume and price using log scaling."""
+    logging.info("Starting normalization and log scaling.")
     # Calculate the moving average
     df['Trade Volume MA'] = df['Trade Volume'].rolling(window=window_size, min_periods=1).mean()
     df['Trade Price MA'] = df['Trade Price'].rolling(window=window_size, min_periods=1).mean()
@@ -57,81 +50,100 @@ def normalize_and_log_scale(df, window_size=50):
     return df
 
 def add_volume_price_ratio(df):
-    # Avoid division by zero by adding a small constant to the denominator if necessary
+    """Calculate the ratio of trade volume to trade price and handle division by zero issues."""
     df['Volume_Price_Ratio'] = df['Trade Volume'] / (df['Trade Price'] + 1e-8)
     return df
 
-def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3):
+def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=4):
+    """Build a neural network model with an embedding layer."""
     input_layer = Input(shape=(1,))
     embedding = Embedding(input_dim=num_symbols + 1, output_dim=embedding_dim)(input_layer)
     flat = Flatten()(embedding)
     
-    dense = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(flat)
-    dropout = Dropout(0.5)(dense)
-    output_layer = Dense(feature_dim, activation='linear')(dropout)
+    dropout1 = Dropout(0.4)(flat)
+    
+    # Adding L2 regularization to this dense layer
+    dense1 = Dense(64, kernel_regularizer=l2(0.01))(dropout1)
+    act1 = LeakyReLU(alpha=0.01)(dense1)
+    dropout2 = Dropout(0.4)(act1)
+    
+    # Adding another dense layer with L2 regularization
+    dense2 = Dense(64, kernel_regularizer=l2(0.01))(dropout2)
+    act2 = LeakyReLU(alpha=0.01)(dense2)
+    dropout3 = Dropout(0.4)(act2)
+    
+    output_layer = Dense(feature_dim, activation='linear')(dropout3)
 
     model = Model(inputs=input_layer, outputs=output_layer)
-    model.compile(optimizer=Adam(), loss='mse')
+    model.compile(optimizer=Adam(), loss='mse', metrics=['accuracy'])
     return model
 
-def train_embedding_model(df, model):
-    logging.info("Starting model training.")
-
-    # Updated feature list to include date-time features
-    numerical_features = [
-        'Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean',
-        'month_sin', 'month_cos', 'day_sin', 'day_cos',
-        'hour_sin', 'hour_cos', 'minute_sin', 'minute_cos', 
-        'second_sin', 'second_cos', 'year', 'nanoseconds'
-    ]
-    
-    # Check if all columns are present
-    if not all(col in df.columns for col in numerical_features):
-        raise ValueError("One or more required columns are missing from the DataFrame.")
-
-    # Continue as before
-    split_point = int(len(df) * 0.8)
-    train_df = df.iloc[:split_point]
-    val_df = df.iloc[split_point:]
-
-    logging.info(f"Training DataFrame shape: {train_df.shape}")
-    logging.info(f"Validation DataFrame shape: {val_df.shape}")
-
-    train_inputs = train_df['Symbol'].values.reshape(-1, 1)
-    val_inputs = val_df['Symbol'].values.reshape(-1, 1)
-
-    train_targets = train_df[numerical_features].values
-    val_targets = val_df[numerical_features].values
-
-    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-
-    history = model.fit(train_inputs, train_targets, epochs=50, batch_size=1000,
-                        validation_data=(val_inputs, val_targets), callbacks=[early_stopping, reduce_lr])
-
-    return model, history
+def apply_pca(scaled_df, n_components=4):
+    """Apply PCA to reduce dimensions of the scaled data."""
+    pca = PCA(n_components=n_components)
+    principal_components = pca.fit_transform(scaled_df)
+    pca_df = pd.DataFrame(data=principal_components, columns=scaled_df.columns)
+    return pca_df
 
 def scale_data(df):
-    # Features that require scaling
-    features_to_scale = [
-        'Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean'
-    ]
+    """Scale data features, apply PCA, and combine results with non-scaled features."""
+    features_to_scale = ['Volume_Price_Ratio', 'Trade Volume Log', 'Trade Price Log', 'latency_ns']
 
     scaler = StandardScaler()
-
-    # Scale these features
-    scaled_values = scaler.fit_transform(df[features_to_scale])
-    scaled_df = pd.DataFrame(scaled_values, columns=features_to_scale, index=df.index)
-
-    non_scaled_features = ['Symbol']
+    if features_to_scale:
+        scaled_values = scaler.fit_transform(df[features_to_scale])
+        scaled_df = pd.DataFrame(scaled_values, columns=features_to_scale, index=df.index)
+    else:
+        raise ValueError("Feature list for scaling is empty. Check feature selection.")
+    
+    # Non-scaled features, typically categorical or already scaled differently
+    non_scaled_features = ['Symbol', 'Exchange']
     
     for feature in non_scaled_features:
         scaled_df[feature] = df[feature]
 
-    return scaled_df
+    # Apply PCA on scaled data
+    pca_df = apply_pca(scaled_df[features_to_scale], n_components=4) 
+    print("PCA DataFrame shape:", pca_df.shape) 
+    
+    # Resetting indices to ensure unique index values
+    pca_df.reset_index(drop=True, inplace=True)
+    non_scaled_data = scaled_df[non_scaled_features].reset_index(drop=True)
+    print("Non-scaled DataFrame shape after index reset:", non_scaled_data.shape)
+
+    # Combine PCA features with non-scaled features
+    final_df = pd.concat([pca_df, non_scaled_data], axis=1)
+    print("Final DataFrame shape after concatenation:", final_df.shape)
+    return final_df
+
+
+def train_embedding_model(df, model):
+    """Train the neural network model on the embedding features."""
+    logging.info("Starting model training.")
+    print("Columns being passed: ", df.columns)
+    numerical_features = [
+        'Trade Volume Log', 'Trade Price Log', 'Volume_Price_Ratio', 'latency_ns']
+    if not all(col in df.columns for col in numerical_features + ['Symbol']):
+        logging.error("One or more required columns are missing from the DataFrame.")
+        raise ValueError("One or more required columns are missing from the DataFrame.")
+
+    train_df = df.iloc[:int(len(df) * 0.8)]
+    val_df = df.iloc[int(len(df) * 0.8):]
+    train_inputs = train_df['Symbol'].values.reshape(-1, 1)
+    val_inputs = val_df['Symbol'].values.reshape(-1, 1)
+    train_targets = train_df[numerical_features].values
+    val_targets = val_df[numerical_features].values
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.01)
+
+    history = model.fit(train_inputs, train_targets, epochs=25, batch_size=500,
+                        validation_data=(val_inputs, val_targets), callbacks=[early_stopping, reduce_lr])
+    logging.info("Model training completed.")
+    return model, history
 
 def extract_embeddings(model, num_symbols):
-    # Extract embeddings from the model
+    """Extract embeddings from the trained model."""
     return model.layers[1].get_weights()[0][1:num_symbols+1]  # Skip the first row which is for padding index
 
 def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
@@ -152,98 +164,97 @@ def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
         writer.write_table(table)
         writer.close()
 
-def process_aggregated_data(aggregated_data, embeddings_file):
-    symbol_ids = get_symbol_id_mapping(aggregated_data)
-    aggregated_data = replace_symbols_with_ids(aggregated_data, symbol_ids)
-
-    # Convert execution datetimes to a simpler feature
-    aggregated_data = convert_datetime_features(aggregated_data)
-
-    logging.info(f"Columns available in DataFrame: {aggregated_data.columns}")
-    scaled_data = scale_data(aggregated_data)
-    #pca_data, pca_model = apply_pca(scaled_data, n_components=0.95)
-    model = build_embedding_model(len(symbol_ids))
-    #trained_model, history = train_embedding_model(pca_data, model)
-    trained_model, history = train_embedding_model(scaled_data,model)
-    embeddings = extract_embeddings(trained_model, len(symbol_ids))
-    save_embeddings_to_parquet(embeddings, symbol_ids, embeddings_file)
-    
-def process_file(file_path, embeddings_file):
+def process_file(file_path, embeddings_file, sector_file):
+    """Process each file, apply data transformations, train the model, and save embeddings."""
     logging.info("Processing file: %s", file_path)
     ddf = dd.read_parquet(file_path, blocksize='500MB')
-    
+    # Load sectors and create a list of included symbols
+    included_symbols = load_sector_data(sector_file)
     # Debugging output to confirm columns post-loading
-    print("Columns available after loading:", ddf.columns)
-
-    # Apply date-time and other feature transformations
-    ddf = ddf.map_partitions(add_datetime_features)
+    logging.info("Columns available after loading: %s", ddf.columns)
 
     ddf = ddf.map_partitions(add_volume_price_ratio)
     ddf = ddf.map_partitions(normalize_and_log_scale)
 
-    if ddf.npartitions == 0:
-        logging.info("No valid symbols found in file: %s", file_path)
+    # Instead of computing the whole DataFrame at once, process each partition
+    logging.info("Processing each partitition")
+    for partition in ddf.partitions:
+        df = partition.compute()
+        if df.empty:
+            continue
+
+    if df.empty:
+        logging.info("Data is empty after processing file: %s", file_path)
         return
+    
+    symbol_ids = get_symbol_id_mapping(df, included_symbols)
+    logging.info("Symbol ids: %s", included_symbols[:10])
+    df = replace_symbols_with_ids(df, symbol_ids)
+    scaled_data = scale_data(df)
 
-    aggregated_data = aggregate_and_compute(ddf)
-    if aggregated_data.empty:
-        logging.info("Aggregated data is empty after processing file: %s", file_path)
-        return
+    model = build_embedding_model(len(symbol_ids))
+    trained_model, history = train_embedding_model(scaled_data, model)
+    embeddings = extract_embeddings(trained_model, len(symbol_ids))
+    save_embeddings_to_parquet(embeddings, symbol_ids, embeddings_file)
+    return history
 
-    print("Columns before processing aggregated data:", aggregated_data.columns)
-    process_aggregated_data(aggregated_data, embeddings_file)
+def aggregate_and_plot_histories(histories, file_name):
+    """Aggregate training and validation metrics across all files and plot the results."""
+    avg_loss = []
+    avg_val_loss = []
+    epochs = len(histories[0]['loss']) 
 
-    # More debugging outputs to trace the data
-    print("Final columns in aggregated data:", aggregated_data.columns)
+    for i in range(epochs):
+        avg_loss.append(np.mean([h['loss'][i] for h in histories]))
+        avg_val_loss.append(np.mean([h['val_loss'][i] for h in histories]))
 
-def convert_datetime_features(df):
-    # Convert list of execution datetimes to a simple count of unique datetimes
-    df['Execution Datetimes Count'] = df['Execution Datetimes'].apply(len)
-    return df
+    plt.figure(figsize=(10, 5))
+    plt.plot(avg_loss, label='Average Training Loss')
+    plt.plot(avg_val_loss, label='Average Validation Loss')
+    plt.title('Average Model Loss Across All Files')
+    plt.ylabel('Loss')
+    plt.xlabel('Epoch')
+    plt.legend()
+    plt.savefig(f'{file_name}.png')
+    plt.show()
 
-
-def aggregate_data(df):
-    # Aggregate and explicitly name the columns with '_mean' suffix
-    df_agg = df.groupby('Symbol').agg({
-        'Trade Volume Log': 'mean',
-        'Trade Price Log': 'mean',
-        'Volume_Price_Ratio': 'mean',
-    }).reset_index()
-
-    # Collect all unique execution datetimes for each symbol into a list
-    execution_datetimes = df.groupby('Symbol')['Execution DateTime'].unique().reset_index()
-    execution_datetimes.rename(columns={'Execution DateTime': 'Execution Datetimes'}, inplace=True)
-
-    # Merge the aggregated data with the datetime lists
-    df_agg = pd.merge(df_agg, execution_datetimes, on='Symbol', how='left')
-    df_agg.columns = ['Symbol', 'Trade Volume Log_mean', 'Trade Price Log_mean', 'Volume_Price_Ratio_mean' ,'Execution Datetimes']
-    return df_agg
-
-def aggregate_and_compute(ddf):
-    meta = {
-        'Symbol': 'object',
-        'Trade Volume Log_mean': 'float64',  # corrected from 'Trade Volume Log_mean'
-        'Trade Price Log_mean': 'float64',   # corrected from 'Trade Price Log_mean'
-        'Volume_Price_Ratio_mean': 'float64', # corrected from 'Volume_Price_Ratio_mean'
-        'Execution Datetimes': 'object'  # make sure to include all columns that are produced
-    }
-    return ddf.map_partitions(aggregate_data, meta=meta).compute()
-
+def setup_tensorflow_gpu():
+    """Configure TensorFlow to use GPU efficiently."""
+    logging.info("Setting up GPU...")
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Currently, memory growth needs to be the same across GPUs
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            # Memory growth must be set before GPUs have been initialized
+            print(e)
 
 def main():
     # Set up logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
+    setup_tensorflow_gpu()
+
     # Configuration and paths
     base_dir = os.getcwd()
     output_dir = os.path.join(base_dir, "parquet_output")
     pattern = 'EQY_US_ALL_TRADE_20240102.parquet'
     embeddings_file = os.path.join(output_dir, 'embeddings.parquet')
+    sector_file = os.path.join(base_dir, 'sectors.csv')
 
     files = get_files(output_dir, pattern)
 
+    all_histories = []
     for file in files:
-        process_file(file, embeddings_file)
+        history = process_file(file, embeddings_file, sector_file)
+        if history:
+            all_histories.append(history.history)
+    
+    # After all files are processed, aggregate histories and plot
+    if all_histories:
+        aggregate_and_plot_histories(all_histories, "Aggregate Training and Validation Metrics")
 
     # Perform clustering and evaluation if embeddings are available
     if os.path.exists(embeddings_file):
