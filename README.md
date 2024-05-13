@@ -52,7 +52,7 @@ From singularity, add the following at the end of the file:
 export NVIDIA_DIR=$(dirname $(dirname $(python -c "import nvidia.cudnn;print(nvidia.cudnn.__file__)")))
 export LD_LIBRARY_PATH=$(echo ${NVIDIA_DIR}/*/lib/ | sed -r 's/\s+/:/g')${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 Ensure you have the right tensorflow installed:
-pip install tensorflow[and cuda] (see tensorflow docs)
+python3 -m pip install tensorflow[and-cuda] (see tensorflow docs)
 Copy the latest version of cuda that is supported by the tensorflow version: scp -rp greene-dtn:/scratch/work/public/singularity/cuda12.3.2-cudnn9.0.0-ubuntu-22.04.4.sif .
 ## Make sure you add this cuda version when you run your singularity!
 
@@ -70,3 +70,5 @@ Spectral Silhouette Score: 0.21154426038265228
 Chosen clustering label: kmeans_cluster
 Clustering completed, average purity: 0.47832921517219995
 
+## TO read the parquet file
+python3 parquet_util.py <path_to_parquet>

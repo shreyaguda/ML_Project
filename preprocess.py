@@ -32,9 +32,9 @@ def get_file_size(file_path):
     return os.path.getsize(file_path)
 
 def clean_data(chunk):
-    # Assuming all rows should have exactly the same number of fields as there are columns defined
+    #Assuming all rows should have exactly the same number of fields as there are columns defined
     expected_num_fields = len(chunk.columns)
-    chunk = chunk.dropna(how='any')  # Drop rows with any NaN values which might indicate missing fields
+    chunk = chunk.dropna(how='any')  #Drop rows with any NaN values which might indicate missing fields
     return chunk[chunk.apply(lambda x: len(x) == expected_num_fields, axis=1)]
 
 #Get all the datatypes and columns from file
@@ -65,11 +65,11 @@ def add_date_component(time_data, file_date):
     return date_timestamp + (time_data - time_data.dt.normalize())
 
 def add_full_nanoseconds(chunk):
-    # Calculate full nanoseconds since the last full second
+    #Calculate full nanoseconds since the last full second
     chunk['nanoseconds'] = chunk['Execution DateTime'].dt.microsecond * 1000 + chunk['Execution DateTime'].dt.nanosecond
     return chunk
 
-# Parse the 'Time' and 'Participant Timestamp' columns to extract time components and calculate latency
+#Parse the 'Time' and 'Participant Timestamp' columns to extract time components and calculate latency
 def parse_trade_execution_time(chunk, file_date):
     base_date = pd.to_datetime(file_date.strftime('%Y-%m-%d'))
 
@@ -81,7 +81,7 @@ def parse_trade_execution_time(chunk, file_date):
 
     chunk['latency_ns'] = (chunk['Execution DateTime'] - chunk['Participant DateTime']).dt.total_seconds() * 1e9
 
-    # Additional step to calculate full nanoseconds
+    #Additional step to calculate full nanoseconds
     chunk = add_full_nanoseconds(chunk)
 
     chunk['year'] = chunk['Execution DateTime'].dt.year
@@ -91,7 +91,7 @@ def parse_trade_execution_time(chunk, file_date):
     chunk['minute'] = chunk['Execution DateTime'].dt.minute
     chunk['second'] = chunk['Execution DateTime'].dt.second
 
-    # Clean up the DataFrame
+    #Clean up the DataFrame
     chunk.drop(columns=['Participant Timestamp', 'Time', 'Participant DateTime' ], inplace=True)
     return chunk
 
@@ -154,8 +154,8 @@ def main():
     else:
         print("No files processed or files were empty.")
 
-    end_time = datetime.now()  # End timing for the whole main function
-    print(f"Total time taken for main execution: {end_time - start_time}")  # Print elapsed time for the whole main function
+    end_time = datetime.now()  #End timing for the whole main function
+    print(f"Total time taken for main execution: {end_time - start_time}")  #Print elapsed time for the whole main function
 
 if __name__ == "__main__":
     main()

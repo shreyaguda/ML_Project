@@ -15,30 +15,31 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from preprocess import get_files
 import matplotlib.pyplot as plt
 import tensorflow as tf
+import random
 
 
 # Set the environment variable for TensorFlow to use asynchronous GPU allocation
 os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
 
 def load_sector_data(filepath):
-    """Load sector data, specifying Symbol as a string to ensure type consistency."""
+    #Load sector data, specifying Symbol as a string to ensure type consistency
     return pd.read_csv(filepath, header=None, names=['Symbol', 'Sector'], dtype={'Symbol': str})
 
 def get_symbol_id_mapping(df, included_symbols):
-    """Map each symbol to a unique ID for use in the model."""
+    #Map each symbol to a unique ID for use in the model
     df = df[df['Symbol'].isin(included_symbols['Symbol'])]
     symbol_ids = {symbol: idx for idx, symbol in enumerate(df['Symbol'].unique())}
     logging.info(f"Symbol IDs generated: {len(symbol_ids)}")
     return symbol_ids
 
 def replace_symbols_with_ids(df, symbol_ids):
-    """Replace symbol strings with their corresponding IDs in the dataframe."""
+    #Replace symbol strings with their corresponding IDs in the dataframe
     df['Symbol'] = df['Symbol'].apply(lambda x: symbol_ids.get(x, -1))  # Use -1 for missing symbols to debug
     logging.info("After replacing symbols, data sample: {}".format(df.head()))
     return df
 
 def normalize_and_log_scale(df, window_size=50):
-    """Normalize trade volume and price using log scaling."""
+    #Normalize trade volume and price using log scaling
     logging.info("Starting normalization and log scaling.")
     # Calculate the moving average
     df['Trade Volume MA'] = df['Trade Volume'].rolling(window=window_size, min_periods=1).mean()
@@ -47,47 +48,50 @@ def normalize_and_log_scale(df, window_size=50):
     # Apply logarithmic scaling, adding a small constant to avoid log(0)
     df['Trade Volume Log'] = np.log(df['Trade Volume MA'] + 1)
     df['Trade Price Log'] = np.log(df['Trade Price MA'] + 1)
+
     return df
 
 def add_volume_price_ratio(df):
-    """Calculate the ratio of trade volume to trade price and handle division by zero issues."""
-    df['Volume_Price_Ratio'] = df['Trade Volume'] / (df['Trade Price'] + 1e-8)
+    #Calculate the ratio of trade volume to trade price and handle division by zero issues.
+    df['Volume_Price_Ratio'] = np.log((df['Trade Volume'] / (df['Trade Price'])) + 1)
+
     return df
 
-def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=4):
-    """Build a neural network model with an embedding layer."""
+def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3, dropout_rate=0.4, l2_reg=0.01, learning_rate=0.01, num_dense_layers=32):
+    #Build a neural network model with an embedding layer
     input_layer = Input(shape=(1,))
     embedding = Embedding(input_dim=num_symbols + 1, output_dim=embedding_dim)(input_layer)
     flat = Flatten()(embedding)
     
-    dropout1 = Dropout(0.4)(flat)
+    dropout1 = Dropout(dropout_rate)(flat)
     
     # Adding L2 regularization to this dense layer
-    dense1 = Dense(64, kernel_regularizer=l2(0.01))(dropout1)
-    act1 = LeakyReLU(alpha=0.01)(dense1)
-    dropout2 = Dropout(0.4)(act1)
+    dense1 = Dense(num_dense_layers, kernel_regularizer=l2(l2_reg))(dropout1)
+    act1 = LeakyReLU(negative_slope=0.01)(dense1)
+    dropout2 = Dropout(dropout_rate)(act1)
     
     # Adding another dense layer with L2 regularization
-    dense2 = Dense(64, kernel_regularizer=l2(0.01))(dropout2)
-    act2 = LeakyReLU(alpha=0.01)(dense2)
-    dropout3 = Dropout(0.4)(act2)
+    dense2 = Dense(num_dense_layers, kernel_regularizer=l2(l2_reg))(dropout2)
+    act2 = LeakyReLU(negative_slope=0.01)(dense2)
+    dropout3 = Dropout(dropout_rate)(act2)
     
     output_layer = Dense(feature_dim, activation='linear')(dropout3)
 
     model = Model(inputs=input_layer, outputs=output_layer)
-    model.compile(optimizer=Adam(), loss='mse', metrics=['accuracy'])
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='mse', metrics=['accuracy'])
     return model
 
-def apply_pca(scaled_df, n_components=4):
-    """Apply PCA to reduce dimensions of the scaled data."""
+def apply_pca(scaled_df, n_components=3):
+    #Apply PCA to reduce dimensions of the scaled data
     pca = PCA(n_components=n_components)
     principal_components = pca.fit_transform(scaled_df)
     pca_df = pd.DataFrame(data=principal_components, columns=scaled_df.columns)
     return pca_df
 
 def scale_data(df):
-    """Scale data features, apply PCA, and combine results with non-scaled features."""
-    features_to_scale = ['Volume_Price_Ratio', 'Trade Volume Log', 'Trade Price Log', 'latency_ns']
+    #Scale data features, apply PCA, and combine results with non-scaled features
+    features_to_scale = ['Volume_Price_Ratio', 'Trade Volume Log', 'Trade Price Log']
 
     scaler = StandardScaler()
     if features_to_scale:
@@ -97,13 +101,13 @@ def scale_data(df):
         raise ValueError("Feature list for scaling is empty. Check feature selection.")
     
     # Non-scaled features, typically categorical or already scaled differently
-    non_scaled_features = ['Symbol', 'Exchange']
+    non_scaled_features = ['Symbol']
     
     for feature in non_scaled_features:
         scaled_df[feature] = df[feature]
 
     # Apply PCA on scaled data
-    pca_df = apply_pca(scaled_df[features_to_scale], n_components=4) 
+    pca_df = apply_pca(scaled_df[features_to_scale], n_components=3) 
     print("PCA DataFrame shape:", pca_df.shape) 
     
     # Resetting indices to ensure unique index values
@@ -116,13 +120,12 @@ def scale_data(df):
     print("Final DataFrame shape after concatenation:", final_df.shape)
     return final_df
 
-
-def train_embedding_model(df, model):
-    """Train the neural network model on the embedding features."""
+def train_embedding_model(df, model, batch_size=512):
+    #Train the neural network model on the embedding features
     logging.info("Starting model training.")
     print("Columns being passed: ", df.columns)
-    numerical_features = [
-        'Trade Volume Log', 'Trade Price Log', 'Volume_Price_Ratio', 'latency_ns']
+    numerical_features = ['Trade Volume Log', 'Trade Price Log', 'Volume_Price_Ratio']
+    
     if not all(col in df.columns for col in numerical_features + ['Symbol']):
         logging.error("One or more required columns are missing from the DataFrame.")
         raise ValueError("One or more required columns are missing from the DataFrame.")
@@ -134,20 +137,20 @@ def train_embedding_model(df, model):
     train_targets = train_df[numerical_features].values
     val_targets = val_df[numerical_features].values
 
-    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.01)
+    early_stopping = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=0.001)
 
-    history = model.fit(train_inputs, train_targets, epochs=25, batch_size=500,
+    history = model.fit(train_inputs, train_targets, epochs=20, batch_size=batch_size,
                         validation_data=(val_inputs, val_targets), callbacks=[early_stopping, reduce_lr])
     logging.info("Model training completed.")
     return model, history
 
 def extract_embeddings(model, num_symbols):
-    """Extract embeddings from the trained model."""
+    #Extract embeddings from the trained model
     return model.layers[1].get_weights()[0][1:num_symbols+1]  # Skip the first row which is for padding index
 
 def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
-    """ Save the embeddings with symbol IDs to a Parquet file using PyArrow for append support. """
+    # Save the embeddings with symbol IDs to a Parquet file using PyArrow for append support. #
     # Convert embeddings to DataFrame
     embeddings_df = pd.DataFrame(embeddings, index=pd.Index(symbol_ids.keys(), name='Symbol'))
     embeddings_df.reset_index(inplace=True)
@@ -164,8 +167,12 @@ def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
         writer.write_table(table)
         writer.close()
 
+def random_hyperparameters(param_space):
+    #Generate a random set of hyperparameters from the defined space
+    return {key: random.choice(values) for key, values in param_space.items()}
+
 def process_file(file_path, embeddings_file, sector_file):
-    """Process each file, apply data transformations, train the model, and save embeddings."""
+    #Process each file, apply data transformations, train the model, and save embeddings
     logging.info("Processing file: %s", file_path)
     ddf = dd.read_parquet(file_path, blocksize='500MB')
     # Load sectors and create a list of included symbols
@@ -173,15 +180,13 @@ def process_file(file_path, embeddings_file, sector_file):
     # Debugging output to confirm columns post-loading
     logging.info("Columns available after loading: %s", ddf.columns)
 
+    logging.info("Applying data transformations") 
     ddf = ddf.map_partitions(add_volume_price_ratio)
     ddf = ddf.map_partitions(normalize_and_log_scale)
 
-    # Instead of computing the whole DataFrame at once, process each partition
-    logging.info("Processing each partitition")
-    for partition in ddf.partitions:
-        df = partition.compute()
-        if df.empty:
-            continue
+    # Compute to convert Dask DataFrame to Pandas DataFrame for operations not supported in Dask
+    logging.info("Coverting to pandas dataframe") 
+    df = ddf.compute()
 
     if df.empty:
         logging.info("Data is empty after processing file: %s", file_path)
@@ -192,17 +197,18 @@ def process_file(file_path, embeddings_file, sector_file):
     df = replace_symbols_with_ids(df, symbol_ids)
     scaled_data = scale_data(df)
 
-    model = build_embedding_model(len(symbol_ids))
-    trained_model, history = train_embedding_model(scaled_data, model)
+    model = build_embedding_model(len(symbol_ids), dropout_rate=0.4, l2_reg=0.01, learning_rate=0.01, num_dense_layers=32)
+    trained_model, history = train_embedding_model(scaled_data, model, batch_size=1024)
+
     embeddings = extract_embeddings(trained_model, len(symbol_ids))
     save_embeddings_to_parquet(embeddings, symbol_ids, embeddings_file)
-    return history
+    return history.history
 
 def aggregate_and_plot_histories(histories, file_name):
-    """Aggregate training and validation metrics across all files and plot the results."""
+    #Aggregate training and validation metrics across all files and plot the results
     avg_loss = []
     avg_val_loss = []
-    epochs = len(histories[0]['loss']) 
+    epochs = len(histories[0]['loss'])  # Ensure all history dictionaries contain 'loss'
 
     for i in range(epochs):
         avg_loss.append(np.mean([h['loss'][i] for h in histories]))
@@ -219,7 +225,7 @@ def aggregate_and_plot_histories(histories, file_name):
     plt.show()
 
 def setup_tensorflow_gpu():
-    """Configure TensorFlow to use GPU efficiently."""
+    #Configure TensorFlow to use GPU efficiently
     logging.info("Setting up GPU...")
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
@@ -240,18 +246,48 @@ def main():
     # Configuration and paths
     base_dir = os.getcwd()
     output_dir = os.path.join(base_dir, "parquet_output")
-    pattern = 'EQY_US_ALL_TRADE_20240102.parquet'
+    pattern = 'EQY_US_ALL_TRADE_20240*.parquet'
     embeddings_file = os.path.join(output_dir, 'embeddings.parquet')
     sector_file = os.path.join(base_dir, 'sectors.csv')
 
     files = get_files(output_dir, pattern)
-
     all_histories = []
-    for file in files:
-        history = process_file(file, embeddings_file, sector_file)
-        if history:
-            all_histories.append(history.history)
+
+    """ # num_iterations = 10  # Number of random hyperparameter configurations to test
+
+    best_loss = float('inf')
+    best_params = None
+
+    # Define the range of values for hyperparameters
+    param_space = {
+        'dropout_rate': np.arange(0.3, 0.5, 0.1),
+        'learning_rate': [0.01, 0.001, 0.0001],
+        'l2_reg': [0.01, 0.05, 0.1],
+        'batch_size': [1024],
+        'num_dense_layers': [16, 32, 64]
+    }
+
+    for _ in range(num_iterations):
+        hyperparams = random_hyperparameters(param_space)
+        histories = []
+
+        for file in files:
+            history = process_file(file, embeddings_file, sector_file, hyperparams)
+            if history:
+                histories.append(history.history['val_loss'][-1])  # Get last validation loss
+
+        average_loss = np.mean(histories) if histories else float('inf')
+        if average_loss < best_loss:
+            best_loss = average_loss
+            best_params = hyperparams
+
+    logging.info(f"Best loss: {best_loss} with hyperparameters: {best_params}")  """
     
+    for file in files:
+            history = process_file(file, embeddings_file, sector_file)
+            if history:
+                all_histories.append(history)  # Get last validation loss
+
     # After all files are processed, aggregate histories and plot
     if all_histories:
         aggregate_and_plot_histories(all_histories, "Aggregate Training and Validation Metrics")
