@@ -18,7 +18,7 @@ import tensorflow as tf
 import random
 
 
-# Set the environment variable for TensorFlow to use asynchronous GPU allocation
+#Set the environment variable for TensorFlow to use asynchronous GPU allocation
 os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
 
 def load_sector_data(filepath):
@@ -34,18 +34,18 @@ def get_symbol_id_mapping(df, included_symbols):
 
 def replace_symbols_with_ids(df, symbol_ids):
     #Replace symbol strings with their corresponding IDs in the dataframe
-    df['Symbol'] = df['Symbol'].apply(lambda x: symbol_ids.get(x, -1))  # Use -1 for missing symbols to debug
+    df['Symbol'] = df['Symbol'].apply(lambda x: symbol_ids.get(x, -1))  #Use -1 for missing symbols to debug
     logging.info("After replacing symbols, data sample: {}".format(df.head()))
     return df
 
 def normalize_and_log_scale(df, window_size=50):
     #Normalize trade volume and price using log scaling
     logging.info("Starting normalization and log scaling.")
-    # Calculate the moving average
+    #Calculate the moving average
     df['Trade Volume MA'] = df['Trade Volume'].rolling(window=window_size, min_periods=1).mean()
     df['Trade Price MA'] = df['Trade Price'].rolling(window=window_size, min_periods=1).mean()
 
-    # Apply logarithmic scaling, adding a small constant to avoid log(0)
+    #Apply logarithmic scaling, adding a small constant to avoid log(0)
     df['Trade Volume Log'] = np.log(df['Trade Volume MA'] + 1)
     df['Trade Price Log'] = np.log(df['Trade Price MA'] + 1)
 
@@ -65,12 +65,13 @@ def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3, dropout_
     
     dropout1 = Dropout(dropout_rate)(flat)
     
-    # Adding L2 regularization to this dense layer
+    #Adding L2 regularization to this dense layer
     dense1 = Dense(num_dense_layers, kernel_regularizer=l2(l2_reg))(dropout1)
+    #Use LeakyRelu to returns a small negative value instead of returning zero for negative inputs
     act1 = LeakyReLU(negative_slope=0.01)(dense1)
     dropout2 = Dropout(dropout_rate)(act1)
     
-    # Adding another dense layer with L2 regularization
+    #Adding another dense layer with L2 regularization
     dense2 = Dense(num_dense_layers, kernel_regularizer=l2(l2_reg))(dropout2)
     act2 = LeakyReLU(negative_slope=0.01)(dense2)
     dropout3 = Dropout(dropout_rate)(act2)
@@ -100,22 +101,22 @@ def scale_data(df):
     else:
         raise ValueError("Feature list for scaling is empty. Check feature selection.")
     
-    # Non-scaled features, typically categorical or already scaled differently
+    #Non-scaled features, typically categorical or already scaled differently
     non_scaled_features = ['Symbol']
     
     for feature in non_scaled_features:
         scaled_df[feature] = df[feature]
 
-    # Apply PCA on scaled data
+    #Apply PCA on scaled data
     pca_df = apply_pca(scaled_df[features_to_scale], n_components=3) 
     print("PCA DataFrame shape:", pca_df.shape) 
     
-    # Resetting indices to ensure unique index values
+    #Resetting indices to ensure unique index values
     pca_df.reset_index(drop=True, inplace=True)
     non_scaled_data = scaled_df[non_scaled_features].reset_index(drop=True)
     print("Non-scaled DataFrame shape after index reset:", non_scaled_data.shape)
 
-    # Combine PCA features with non-scaled features
+    #Combine PCA features with non-scaled features
     final_df = pd.concat([pca_df, non_scaled_data], axis=1)
     print("Final DataFrame shape after concatenation:", final_df.shape)
     return final_df
@@ -147,22 +148,22 @@ def train_embedding_model(df, model, batch_size=512):
 
 def extract_embeddings(model, num_symbols):
     #Extract embeddings from the trained model
-    return model.layers[1].get_weights()[0][1:num_symbols+1]  # Skip the first row which is for padding index
+    return model.layers[1].get_weights()[0][1:num_symbols+1]  #Skip the first row which is for padding index
 
 def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
-    # Save the embeddings with symbol IDs to a Parquet file using PyArrow for append support. #
-    # Convert embeddings to DataFrame
+    #Save the embeddings with symbol IDs to a Parquet file using PyArrow for append support
+    #Convert embeddings to DataFrame
     embeddings_df = pd.DataFrame(embeddings, index=pd.Index(symbol_ids.keys(), name='Symbol'))
     embeddings_df.reset_index(inplace=True)
     
     table = pa.Table.from_pandas(embeddings_df, preserve_index=False)
     
-    # Check if the file exists, if not, create it, else append to it
+    #Check if the file exists, if not, create it, else append to it
     if not os.path.exists(filename):
-        # Write a new Parquet file
+        #Write a new Parquet file
         pq.write_table(table, filename)
     else:
-        # Open the existing Parquet file and append data
+        #Open the existing Parquet file and append data
         writer = pq.ParquetWriter(filename, table.schema, flavor='spark')
         writer.write_table(table)
         writer.close()
@@ -175,16 +176,16 @@ def process_file(file_path, embeddings_file, sector_file):
     #Process each file, apply data transformations, train the model, and save embeddings
     logging.info("Processing file: %s", file_path)
     ddf = dd.read_parquet(file_path, blocksize='500MB')
-    # Load sectors and create a list of included symbols
+    #Load sectors and create a list of included symbols
     included_symbols = load_sector_data(sector_file)
-    # Debugging output to confirm columns post-loading
+    #Debugging output to confirm columns post-loading
     logging.info("Columns available after loading: %s", ddf.columns)
 
     logging.info("Applying data transformations") 
     ddf = ddf.map_partitions(add_volume_price_ratio)
     ddf = ddf.map_partitions(normalize_and_log_scale)
 
-    # Compute to convert Dask DataFrame to Pandas DataFrame for operations not supported in Dask
+    #Compute to convert Dask DataFrame to Pandas DataFrame for operations not supported in Dask
     logging.info("Coverting to pandas dataframe") 
     df = ddf.compute()
 
@@ -208,7 +209,7 @@ def aggregate_and_plot_histories(histories, file_name):
     #Aggregate training and validation metrics across all files and plot the results
     avg_loss = []
     avg_val_loss = []
-    epochs = len(histories[0]['loss'])  # Ensure all history dictionaries contain 'loss'
+    epochs = len(histories[0]['loss'])  #Ensure all history dictionaries contain 'loss'
 
     for i in range(epochs):
         avg_loss.append(np.mean([h['loss'][i] for h in histories]))
@@ -230,20 +231,20 @@ def setup_tensorflow_gpu():
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
-            # Currently, memory growth needs to be the same across GPUs
+            #Currently, memory growth needs to be the same across GPUs
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
         except RuntimeError as e:
-            # Memory growth must be set before GPUs have been initialized
+            #Memory growth must be set before GPUs have been initialized
             print(e)
 
 def main():
-    # Set up logging
+    #Set up logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
     setup_tensorflow_gpu()
 
-    # Configuration and paths
+    #Configuration and paths
     base_dir = os.getcwd()
     output_dir = os.path.join(base_dir, "parquet_output")
     pattern = 'EQY_US_ALL_TRADE_20240*.parquet'
@@ -253,12 +254,12 @@ def main():
     files = get_files(output_dir, pattern)
     all_histories = []
 
-    """ # num_iterations = 10  # Number of random hyperparameter configurations to test
+    """ #num_iterations = 10  #Number of random hyperparameter configurations to test
 
     best_loss = float('inf')
     best_params = None
 
-    # Define the range of values for hyperparameters
+    #Define the range of values for hyperparameters
     param_space = {
         'dropout_rate': np.arange(0.3, 0.5, 0.1),
         'learning_rate': [0.01, 0.001, 0.0001],
@@ -274,7 +275,7 @@ def main():
         for file in files:
             history = process_file(file, embeddings_file, sector_file, hyperparams)
             if history:
-                histories.append(history.history['val_loss'][-1])  # Get last validation loss
+                histories.append(history.history['val_loss'][-1])  #Get last validation loss
 
         average_loss = np.mean(histories) if histories else float('inf')
         if average_loss < best_loss:
@@ -286,13 +287,13 @@ def main():
     for file in files:
             history = process_file(file, embeddings_file, sector_file)
             if history:
-                all_histories.append(history)  # Get last validation loss
+                all_histories.append(history)  #Get last validation loss
 
-    # After all files are processed, aggregate histories and plot
+    #After all files are processed, aggregate histories and plot
     if all_histories:
         aggregate_and_plot_histories(all_histories, "Aggregate Training and Validation Metrics")
 
-    # Perform clustering and evaluation if embeddings are available
+    #Perform clustering and evaluation if embeddings are available
     if os.path.exists(embeddings_file):
         logging.info("Embeddings file exists.")
     else:
