@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import logging
 import os
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.decomposition import PCA
 from keras.models import Model
 from keras.layers import Input, Embedding, Dense, Flatten, Dropout, LeakyReLU
@@ -16,14 +16,20 @@ from preprocess import get_files
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import random
-
+import json
 
 #Set the environment variable for TensorFlow to use asynchronous GPU allocation
 os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
 
 def load_sector_data(filepath):
-    #Load sector data, specifying Symbol as a string to ensure type consistency
+    #Load sector data
     return pd.read_csv(filepath, header=None, names=['Symbol', 'Sector'], dtype={'Symbol': str})
+
+def add_cyclic_time_features(df):
+    # Adding cyclic features for hour
+    df['hour_sin'] = np.sin(df['hour'] * (2. * np.pi / 24))
+    df['hour_cos'] = np.cos(df['hour'] * (2. * np.pi / 24))
+    return df
 
 def get_symbol_id_mapping(df, included_symbols):
     #Map each symbol to a unique ID for use in the model
@@ -41,23 +47,21 @@ def replace_symbols_with_ids(df, symbol_ids):
 def normalize_and_log_scale(df, window_size=50):
     #Normalize trade volume and price using log scaling
     logging.info("Starting normalization and log scaling.")
+
     #Calculate the moving average
     df['Trade Volume MA'] = df['Trade Volume'].rolling(window=window_size, min_periods=1).mean()
-    df['Trade Price MA'] = df['Trade Price'].rolling(window=window_size, min_periods=1).mean()
 
     #Apply logarithmic scaling, adding a small constant to avoid log(0)
     df['Trade Volume Log'] = np.log(df['Trade Volume MA'] + 1)
-    df['Trade Price Log'] = np.log(df['Trade Price MA'] + 1)
 
     return df
 
 def add_volume_price_ratio(df):
     #Calculate the ratio of trade volume to trade price and handle division by zero issues.
     df['Volume_Price_Ratio'] = np.log((df['Trade Volume'] / (df['Trade Price'])) + 1)
-
     return df
 
-def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3, dropout_rate=0.4, l2_reg=0.01, learning_rate=0.01, num_dense_layers=32):
+def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=4, dropout_rate=0.4, l2_reg=0.01, learning_rate=0.01, num_dense_layers=32):
     #Build a neural network model with an embedding layer
     input_layer = Input(shape=(1,))
     embedding = Embedding(input_dim=num_symbols + 1, output_dim=embedding_dim)(input_layer)
@@ -67,7 +71,6 @@ def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3, dropout_
     
     #Adding L2 regularization to this dense layer
     dense1 = Dense(num_dense_layers, kernel_regularizer=l2(l2_reg))(dropout1)
-    #Use LeakyRelu to returns a small negative value instead of returning zero for negative inputs
     act1 = LeakyReLU(negative_slope=0.01)(dense1)
     dropout2 = Dropout(dropout_rate)(act1)
     
@@ -83,7 +86,7 @@ def build_embedding_model(num_symbols, embedding_dim=20, feature_dim=3, dropout_
     model.compile(optimizer=optimizer, loss='mse', metrics=['accuracy'])
     return model
 
-def apply_pca(scaled_df, n_components=3):
+def apply_pca(scaled_df, n_components=2):
     #Apply PCA to reduce dimensions of the scaled data
     pca = PCA(n_components=n_components)
     principal_components = pca.fit_transform(scaled_df)
@@ -92,8 +95,7 @@ def apply_pca(scaled_df, n_components=3):
 
 def scale_data(df):
     #Scale data features, apply PCA, and combine results with non-scaled features
-    features_to_scale = ['Volume_Price_Ratio', 'Trade Volume Log', 'Trade Price Log']
-
+    features_to_scale = ['Volume_Price_Ratio', 'Trade Volume Log']
     scaler = StandardScaler()
     if features_to_scale:
         scaled_values = scaler.fit_transform(df[features_to_scale])
@@ -102,13 +104,13 @@ def scale_data(df):
         raise ValueError("Feature list for scaling is empty. Check feature selection.")
     
     #Non-scaled features, typically categorical or already scaled differently
-    non_scaled_features = ['Symbol']
+    non_scaled_features = ['Symbol', 'hour_sin', 'hour_cos']
     
     for feature in non_scaled_features:
         scaled_df[feature] = df[feature]
 
     #Apply PCA on scaled data
-    pca_df = apply_pca(scaled_df[features_to_scale], n_components=3) 
+    pca_df = apply_pca(scaled_df[features_to_scale], n_components=2) 
     print("PCA DataFrame shape:", pca_df.shape) 
     
     #Resetting indices to ensure unique index values
@@ -125,8 +127,9 @@ def train_embedding_model(df, model, batch_size=512):
     #Train the neural network model on the embedding features
     logging.info("Starting model training.")
     print("Columns being passed: ", df.columns)
-    numerical_features = ['Trade Volume Log', 'Trade Price Log', 'Volume_Price_Ratio']
-    
+
+    numerical_features = ['Volume_Price_Ratio', 'Trade Volume Log', 'hour_sin', 'hour_cos']
+
     if not all(col in df.columns for col in numerical_features + ['Symbol']):
         logging.error("One or more required columns are missing from the DataFrame.")
         raise ValueError("One or more required columns are missing from the DataFrame.")
@@ -151,7 +154,7 @@ def extract_embeddings(model, num_symbols):
     return model.layers[1].get_weights()[0][1:num_symbols+1]  #Skip the first row which is for padding index
 
 def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
-    #Save the embeddings with symbol IDs to a Parquet file using PyArrow for append support
+    #Save the embeddings with symbol IDs to a Parquet file using PyArrow for append support.
     #Convert embeddings to DataFrame
     embeddings_df = pd.DataFrame(embeddings, index=pd.Index(symbol_ids.keys(), name='Symbol'))
     embeddings_df.reset_index(inplace=True)
@@ -168,10 +171,6 @@ def save_embeddings_to_parquet(embeddings, symbol_ids, filename):
         writer.write_table(table)
         writer.close()
 
-def random_hyperparameters(param_space):
-    #Generate a random set of hyperparameters from the defined space
-    return {key: random.choice(values) for key, values in param_space.items()}
-
 def process_file(file_path, embeddings_file, sector_file):
     #Process each file, apply data transformations, train the model, and save embeddings
     logging.info("Processing file: %s", file_path)
@@ -184,6 +183,7 @@ def process_file(file_path, embeddings_file, sector_file):
     logging.info("Applying data transformations") 
     ddf = ddf.map_partitions(add_volume_price_ratio)
     ddf = ddf.map_partitions(normalize_and_log_scale)
+    ddf = ddf.map_partitions(add_cyclic_time_features)
 
     #Compute to convert Dask DataFrame to Pandas DataFrame for operations not supported in Dask
     logging.info("Coverting to pandas dataframe") 
@@ -206,14 +206,11 @@ def process_file(file_path, embeddings_file, sector_file):
     return history.history
 
 def aggregate_and_plot_histories(histories, file_name):
-    #Aggregate training and validation metrics across all files and plot the results
-    avg_loss = []
-    avg_val_loss = []
-    epochs = len(histories[0]['loss'])  #Ensure all history dictionaries contain 'loss'
+    # Find the minimum number of epochs completed in all training runs
+    min_epochs = min(len(h['loss']) for h in histories)
 
-    for i in range(epochs):
-        avg_loss.append(np.mean([h['loss'][i] for h in histories]))
-        avg_val_loss.append(np.mean([h['val_loss'][i] for h in histories]))
+    avg_loss = [np.mean([h['loss'][i] for h in histories if i < len(h['loss'])]) for i in range(min_epochs)]
+    avg_val_loss = [np.mean([h['val_loss'][i] for h in histories if i < len(h['val_loss'])]) for i in range(min_epochs)]
 
     plt.figure(figsize=(10, 5))
     plt.plot(avg_loss, label='Average Training Loss')
@@ -224,6 +221,18 @@ def aggregate_and_plot_histories(histories, file_name):
     plt.legend()
     plt.savefig(f'{file_name}.png')
     plt.show()
+
+def save_histories_to_json(histories, filename):
+    #Save histories to json format for later analysis
+    json_ready_histories = []
+    for history in histories:
+        json_ready_history = {}
+        for key, values in history.items():
+            json_ready_history[key] = [float(value) for value in values]
+        json_ready_histories.append(json_ready_history)
+
+    with open(filename, 'w') as f:
+        json.dump(json_ready_histories, f, indent=4)
 
 def setup_tensorflow_gpu():
     #Configure TensorFlow to use GPU efficiently
@@ -247,42 +256,12 @@ def main():
     #Configuration and paths
     base_dir = os.getcwd()
     output_dir = os.path.join(base_dir, "parquet_output")
-    pattern = 'EQY_US_ALL_TRADE_20240*.parquet'
+    pattern = 'EQY_US_ALL_TRADE_2024*.parquet'
     embeddings_file = os.path.join(output_dir, 'embeddings.parquet')
     sector_file = os.path.join(base_dir, 'sectors.csv')
 
     files = get_files(output_dir, pattern)
     all_histories = []
-
-    """ #num_iterations = 10  #Number of random hyperparameter configurations to test
-
-    best_loss = float('inf')
-    best_params = None
-
-    #Define the range of values for hyperparameters
-    param_space = {
-        'dropout_rate': np.arange(0.3, 0.5, 0.1),
-        'learning_rate': [0.01, 0.001, 0.0001],
-        'l2_reg': [0.01, 0.05, 0.1],
-        'batch_size': [1024],
-        'num_dense_layers': [16, 32, 64]
-    }
-
-    for _ in range(num_iterations):
-        hyperparams = random_hyperparameters(param_space)
-        histories = []
-
-        for file in files:
-            history = process_file(file, embeddings_file, sector_file, hyperparams)
-            if history:
-                histories.append(history.history['val_loss'][-1])  #Get last validation loss
-
-        average_loss = np.mean(histories) if histories else float('inf')
-        if average_loss < best_loss:
-            best_loss = average_loss
-            best_params = hyperparams
-
-    logging.info(f"Best loss: {best_loss} with hyperparameters: {best_params}")  """
     
     for file in files:
             history = process_file(file, embeddings_file, sector_file)
@@ -292,6 +271,8 @@ def main():
     #After all files are processed, aggregate histories and plot
     if all_histories:
         aggregate_and_plot_histories(all_histories, "Aggregate Training and Validation Metrics")
+        #Save histories to JSON for later analysis
+        save_histories_to_json(all_histories, "training_histories.json")
 
     #Perform clustering and evaluation if embeddings are available
     if os.path.exists(embeddings_file):
