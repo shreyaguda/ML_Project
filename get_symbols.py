@@ -2,6 +2,15 @@ import gzip
 import os
 
 def get_unique_symbols_from_file(file_path):
+    """
+    Extract unique symbols from a given gzipped file.
+    
+    Parameters:
+        file_path (str): The path to the gzipped file.
+
+    Returns:
+        set: A set of unique symbols extracted from the file.
+    """
     symbols = set()
     with gzip.open(file_path, 'rt') as file:  # Open the file in text mode
         for line in file:
@@ -12,6 +21,16 @@ def get_unique_symbols_from_file(file_path):
     return symbols
 
 def get_all_unique_symbols(directory, output_path):
+    """
+    Traverse all gzip files in the directory, extract and write unique symbols to an output file.
+
+    Parameters:
+        directory (str): The directory containing gzipped files.
+        output_path (str): The file path where the unique symbols will be written.
+
+    Returns:
+        str: The path of the output file.
+    """
     all_symbols = set()
     for filename in os.listdir(directory):
         if filename.endswith('.gz'):
