@@ -45,7 +45,9 @@ def calculate_silhouette_scores(reduced_embeddings, kmeans_labels, spectral_labe
     return kmeans_score, spectral_score
 
 def evaluate_and_visualize_clusters(embeddings_df, reduced_embeddings, kmeans_labels, spectral_labels, sectors, directory):
-    #Evaluate clustering methods, choose the best, and visualize clusters.
+    # Evaluate and visualize the clustering performance.
+    # This function chooses the best clustering method based on silhouette scores, merges sector data,
+    # calculates purity, and visualizes the clusters.
     kmeans_score, spectral_score = calculate_silhouette_scores(reduced_embeddings, kmeans_labels, spectral_labels)
     chosen_labels = kmeans_labels if kmeans_score >= spectral_score else spectral_labels
     chosen_method = 'KMeans' if kmeans_score >= spectral_score else 'Spectral'
@@ -107,10 +109,12 @@ def visualize_clusters(reduced_data, labels, directory):
     plot_clusters(tsne_data, labels, plot_filename)
 
 def plot_silhouette(reduced_data, labels, score, method, directory):
+    # Plot and save a silhouette diagram to assess the quality of clustering.
     silhouette_vals = silhouette_samples(reduced_data, labels)
     y_lower, y_upper = 0, 0
     ticks = []
 
+    # Plot silhouette values for each cluster
     for i, cluster in enumerate(np.unique(labels)):
         cluster_silhouette_vals = silhouette_vals[labels == cluster]
         cluster_silhouette_vals.sort()
@@ -128,6 +132,7 @@ def plot_silhouette(reduced_data, labels, score, method, directory):
     plt.clf()
 
 def main():
+    # Main function to set up paths, load data, perform clustering, and visualize results.
     base_dir = os.getcwd()
     directory = os.path.join(base_dir, "parquet_output")
     sector_file = os.path.join(base_dir, 'sectors.csv')
